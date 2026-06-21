@@ -1,0 +1,10 @@
+{
+  "name": "polla-mundial-sync",
+  "version": "1.0.0",
+  "description": "Autollenado de fixture y resultados del Mundial 2026 hacia Supabase",
+  "main": "sync.js",
+  "scripts": { "start": "node sync.js" },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}
