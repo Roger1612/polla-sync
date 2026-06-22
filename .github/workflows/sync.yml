@@ -1,1 +1,21 @@
+# Robot que sincroniza el Mundial 2026 cada 15 minutos (gratis en repos públicos).
+# Va en la ruta:  .github/workflows/sync.yml  dentro de tu repo.
+name: Sync Mundial 2026
 
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # cada 15 minutos (hora UTC)
+  workflow_dispatch:          # botón para ejecutarlo a mano cuando quieras
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install
+      - run: node sync.js
+        env:
+          SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
