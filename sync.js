@@ -1,10 +1,10 @@
 // ============================================================
 //  sync.js — Fixture del Mundial 2026 (openfootball → Supabase)
-//  Ahora convive con el live-sync:
-//   • Upsert A: solo datos del fixture (equipos, horario). NUNCA toca
-//     marcador ni estado → no pisa lo que pone el live-sync en vivo.
-//   • Upsert B: solo resultados FINALES (red de seguridad por si el
-//     live-sync se perdió algún partido).
+//  Convive con el live-sync:
+//   • Upsert A (fixture): equipos y horario. NUNCA toca marcador
+//     ni estado → no pisa lo que pone el live-sync en vivo.
+//   • PATCH B (finales): solo actualiza el resultado de los partidos
+//     ya terminados (nunca crea filas) → red de seguridad.
 // ============================================================
 
 const SUPABASE_URL          = "https://shvabecptbciujnpqjnx.supabase.co";
@@ -53,19 +53,33 @@ function toUTC(date, time){
   return new Date(`${date}T${hh.padStart(2,"0")}:${mm}:00${sign}${abs}:00`).toISOString();
 }
 
-async function upsert(rows, label){
+const AUTH = {
+  "apikey": SUPABASE_SERVICE_ROLE,
+  "Authorization": "Bearer " + SUPABASE_SERVICE_ROLE,
+  "Content-Type": "application/json",
+};
+
+// Upsert A — fixture (crea/actualiza meta; trae todas las columnas obligatorias)
+async function upsertMeta(rows){
   if(!rows.length) return;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/matches?on_conflict=ext_id`, {
     method: "POST",
-    headers: {
-      "apikey": SUPABASE_SERVICE_ROLE,
-      "Authorization": "Bearer " + SUPABASE_SERVICE_ROLE,
-      "Content-Type": "application/json",
-      "Prefer": "resolution=merge-duplicates,return=minimal",
-    },
+    headers: { ...AUTH, "Prefer": "resolution=merge-duplicates,return=minimal" },
     body: JSON.stringify(rows),
   });
-  if(!res.ok){ throw new Error(`${label}: HTTP ${res.status} — ${(await res.text()).slice(0,200)}`); }
+  if(!res.ok){ throw new Error(`fixture: HTTP ${res.status} — ${(await res.text()).slice(0,200)}`); }
+}
+
+// PATCH B — resultados finales (SOLO actualiza filas existentes; nunca crea)
+async function patchFinished(rows){
+  for(const r of rows){
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/matches?ext_id=eq.${r.ext_id}`, {
+      method: "PATCH",
+      headers: { ...AUTH, "Prefer": "return=minimal" },
+      body: JSON.stringify({ home_score: r.home_score, away_score: r.away_score, status: "finished" }),
+    });
+    if(!res.ok){ throw new Error(`resultado ext_id ${r.ext_id}: HTTP ${res.status} — ${(await res.text()).slice(0,150)}`); }
+  }
 }
 
 async function main(){
@@ -76,8 +90,8 @@ async function main(){
   const all = (await (await fetch(SOURCE)).json()).matches;
 
   const perGroup = {};
-  const meta = [];        // Upsert A: solo fixture (sin marcador ni estado)
-  const finished = [];    // Upsert B: solo resultados finales
+  const meta = [];        // A: fixture
+  const finished = [];    // B: finales
 
   all.forEach((m, i) => {
     const ext_id = i + 1;
@@ -96,11 +110,10 @@ async function main(){
 
     const ft = m.score && m.score.ft;
     if(Array.isArray(ft)){
-      finished.push({ ext_id, home_score: ft[0], away_score: ft[1], status: "finished" });
+      finished.push({ ext_id, home_score: ft[0], away_score: ft[1] });
     }
   });
 
-  // slots de eliminatorias (R32-1, QF-2, …)
   const counters = {}, PREFIX = {r32:"R32", r16:"R16", qf:"QF", sf:"SF", final:"FINAL", third:"THIRD"};
   meta.forEach(r => {
     if(r._stage !== "group"){ counters[r._stage] = (counters[r._stage]||0)+1; r.slot = `${PREFIX[r._stage]}-${counters[r._stage]}`; }
@@ -108,8 +121,8 @@ async function main(){
   });
 
   console.log(`Sincronizando fixture (${meta.length}) y resultados finales (${finished.length})…`);
-  await upsert(meta, "fixture");          // A: nunca toca marcador/estado en vivo
-  await upsert(finished, "resultados");   // B: confirma finales
+  await upsertMeta(meta);       // A: fixture (no toca marcador/estado en vivo)
+  await patchFinished(finished); // B: confirma finales (solo actualiza)
 
   console.log(`✓ Listo. Fixture ${meta.length} · finales ${finished.length}.`);
 }
