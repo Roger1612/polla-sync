@@ -1,29 +1,19 @@
 // ============================================================
 //  sync.js — Autollenado del fixture y resultados del Mundial 2026
 //  Lee los datos públicos de openfootball (sin API key) y los
-//  mete/actualiza en tu tabla 'matches' de Supabase.
+//  mete/actualiza en tu tabla 'matches' de Supabase vía API REST.
+//  No usa librerías externas: funciona en cualquier Node 18+.
 //
-//  Uso:
-//    1) npm install
-//    2) node sync.js
-//  Córrelo cuando quieras actualizar (después de cada partido).
-//  El puntaje de la polla se recalcula solo al cargar resultados.
-//
-//  Requiere Node 18+ (fetch nativo).
+//  Uso local:   node sync.js
+//  En GitHub Actions: la clave llega por el Secret SUPABASE_SERVICE_ROLE.
 // ============================================================
 
-const { createClient } = require("@supabase/supabase-js");
-
 /* ================================================================
-   ⬇⬇⬇  PEGA AQUÍ TUS DATOS DE SUPABASE  ⬇⬇⬇
-   OJO: aquí va la clave SECRETA (service_role), NO la publishable.
-   Esta clave NUNCA va en app.html ni en el navegador: solo aquí,
-   porque este script corre en tu PC/servidor.
-   Settings → API Keys → "Legacy anon, service_role" → service_role (Reveal)
+   ⬇⬇⬇  DATOS DE SUPABASE  ⬇⬇⬇
+   La clave es la SECRETA (service_role), NO la publishable/anon.
+   En GitHub va por Secret; en local puedes pegarla en el placeholder.
 ================================================================ */
 const SUPABASE_URL          = "https://shvabecptbciujnpqjnx.supabase.co";
-// En GitHub Actions la clave se inyecta por "Secret" (recomendado, no queda en el archivo).
-// Para correr en tu PC, puedes reemplazar el placeholder por tu clave service_role.
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE || "PEGA_TU_SERVICE_ROLE_AQUI";
 /* ================================================================ */
 
@@ -54,7 +44,6 @@ const STAGE = {
   "Semi-final":"sf", "Match for third place":"third", "Final":"final",
 };
 
-// Traduce un equipo o un placeholder de llave (1A, 2B, 3A/B.., W73)
 function team(token){
   if(TEAMS[token]) return {name:TEAMS[token][0], code:TEAMS[token][1]};
   if(/^[12][A-L]$/.test(token)) return {name:`${token[0]}° Grupo ${token[1]}`, code:token};
@@ -64,7 +53,6 @@ function team(token){
   return {name:token, code:"—"};
 }
 
-// "2026-06-24" + "16:00 UTC-4"  →  ISO en UTC
 function toUTC(date, time){
   const m = time.match(/(\d{1,2}):(\d{2})\s*UTC([+-]\d{1,2})/);
   if(!m) return new Date(`${date}T${time}:00Z`).toISOString();
@@ -73,16 +61,31 @@ function toUTC(date, time){
   return new Date(`${date}T${hh.padStart(2,"0")}:${mm}:00${sign}${abs}:00`).toISOString();
 }
 
+async function upsert(rows){
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/matches?on_conflict=ext_id`, {
+    method: "POST",
+    headers: {
+      "apikey": SUPABASE_SERVICE_ROLE,
+      "Authorization": "Bearer " + SUPABASE_SERVICE_ROLE,
+      "Content-Type": "application/json",
+      "Prefer": "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify(rows),
+  });
+  if(!res.ok){
+    const t = await res.text();
+    throw new Error(`HTTP ${res.status} — ${t.slice(0,300)}`);
+  }
+}
+
 async function main(){
   if(SUPABASE_SERVICE_ROLE === "PEGA_TU_SERVICE_ROLE_AQUI"){
-    console.error("✗ Falta pegar tu clave service_role en sync.js"); process.exit(1);
+    console.error("✗ Falta la clave service_role (en el Secret de GitHub o en el archivo)."); process.exit(1);
   }
   console.log("Descargando fixture…");
-  const res = await fetch(SOURCE);
-  const data = await res.json();
+  const data = await (await fetch(SOURCE)).json();
   const all = data.matches;
 
-  // jornada por grupo (1,2,3): 2 partidos por jornada en cada grupo
   const perGroup = {};
   const rows = all.map((m, i) => {
     const isGroup = m.round.startsWith("Matchday");
@@ -98,20 +101,14 @@ async function main(){
     const status = finished ? "finished" : (new Date(ko) <= new Date() ? "live" : "scheduled");
 
     return {
-      ext_id: i + 1,
-      stage, group_name: grp, matchday,
-      slot: isGroup ? null : null, // se asigna abajo por orden de ronda
-      home_team: h.name, home_code: h.code,
-      away_team: a.name, away_code: a.code,
+      ext_id: i + 1, stage, group_name: grp, matchday, slot: null,
+      home_team: h.name, home_code: h.code, away_team: a.name, away_code: a.code,
       kickoff: ko,
-      home_score: finished ? ft[0] : null,
-      away_score: finished ? ft[1] : null,
-      status,
-      _stage: stage,
+      home_score: finished ? ft[0] : null, away_score: finished ? ft[1] : null,
+      status, _stage: stage,
     };
   });
 
-  // asignar slots de llave (R32-1.., R16-1.., QF-1.., SF-1.., FINAL-1, THIRD-1)
   const counters = {};
   const PREFIX = {r32:"R32", r16:"R16", qf:"QF", sf:"SF", final:"FINAL", third:"THIRD"};
   rows.forEach(r => {
@@ -123,13 +120,10 @@ async function main(){
   });
 
   console.log(`Sincronizando ${rows.length} partidos…`);
-  const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth:{ persistSession:false } });
-  const { error } = await sb.from("matches").upsert(rows, { onConflict: "ext_id" });
-  if(error){ console.error("✗ Error al guardar:", error.message); process.exit(1); }
+  await upsert(rows);
 
   const fin = rows.filter(r=>r.status==="finished").length;
   console.log(`✓ Listo. ${rows.length} partidos en la base (${fin} con resultado, ${rows.length-fin} pendientes).`);
-  console.log("  El puntaje de la polla se recalculó solo para los partidos terminados.");
 }
 
 main().catch(e => { console.error("✗", e.message); process.exit(1); });
