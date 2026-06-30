@@ -31,6 +31,9 @@ const TEAMS = {
   "USA":["Estados Unidos","USA"], "Uruguay":["Uruguay","URU"], "Uzbekistan":["Uzbekistán","UZB"],
 };
 
+// Códigos reales (3 letras) — si un partido ya tiene equipos reales, NO se reescriben
+const REAL_CODES = new Set(Object.values(TEAMS).map(t => t[1]));
+
 const STAGE = {
   "Round of 32":"r32", "Round of 16":"r16", "Quarter-final":"qf",
   "Semi-final":"sf", "Match for third place":"third", "Final":"final",
@@ -58,6 +61,15 @@ const AUTH = {
   "Authorization": "Bearer " + SUPABASE_SERVICE_ROLE,
   "Content-Type": "application/json",
 };
+
+// Lee los partidos existentes (para conservar la orientación ya resuelta)
+async function fetchExisting(){
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/matches?select=ext_id,home_team,home_code,away_team,away_code`, { headers: AUTH });
+  if(!res.ok) return {};
+  const map = {};
+  (await res.json()).forEach(r => { map[r.ext_id] = r; });
+  return map;
+}
 
 // Upsert A — fixture (crea/actualiza meta; trae todas las columnas obligatorias)
 async function upsertMeta(rows){
@@ -120,7 +132,21 @@ async function main(){
     delete r._stage;
   });
 
-  console.log(`Sincronizando fixture (${meta.length}) y resultados finales (${finished.length})…`);
+  // BLINDAJE: si un partido ya tiene equipos REALES, conserva su orientación
+  // (no la pisa con el orden de openfootball) → evita invertir local/visita
+  // después de que la gente ya votó.
+  const existing = await fetchExisting();
+  let locked = 0;
+  meta.forEach(r => {
+    const ex = existing[r.ext_id];
+    if(ex && REAL_CODES.has(ex.home_code) && REAL_CODES.has(ex.away_code)){
+      r.home_team = ex.home_team; r.home_code = ex.home_code;
+      r.away_team = ex.away_team; r.away_code = ex.away_code;
+      locked++;
+    }
+  });
+
+  console.log(`Sincronizando fixture (${meta.length}) y resultados finales (${finished.length})… [orientación conservada en ${locked}]`);
   await upsertMeta(meta);       // A: fixture (no toca marcador/estado en vivo)
   await patchFinished(finished); // B: confirma finales (solo actualiza)
 
